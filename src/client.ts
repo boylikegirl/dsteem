@@ -34,14 +34,14 @@
  */
 
 import * as assert from 'assert'
-import {VError} from 'verror'
+import { VError } from 'verror'
 import packageVersion from './version'
 
-import {Blockchain} from './helpers/blockchain'
-import {BroadcastAPI} from './helpers/broadcast'
-import {DatabaseAPI} from './helpers/database'
-import {RCAPI} from './helpers/rc'
-import {copy, retryingFetch, waitForEvent} from './utils'
+import { Blockchain } from './helpers/blockchain'
+import { BroadcastAPI } from './helpers/broadcast'
+import { DatabaseAPI } from './helpers/database'
+import { RCAPI } from './helpers/rc'
+import { copy, retryingFetch, waitForEvent } from './utils'
 
 /**
  * Library version.
@@ -82,8 +82,29 @@ interface RPCCall extends RPCRequest {
      * 2. Method to call on that API.
      * 3. Arguments to pass to the method.
      */
-    params: [number|string, string, any[]]
+    params: [number | string, string, any[]]
 }
+
+interface RPCCustomRequest {
+    /**
+     * Request sequence number.
+     */
+    id: number | string
+    /**
+     * RPC method.
+     */
+    method: string
+    /**
+     * Array of parameters to pass to the method.
+     */
+    jsonrpc: '2.0'
+    params: {}
+}
+
+interface RPCCustomCall extends RPCCustomRequest {
+
+}
+
 
 interface RPCError {
     code: number
@@ -253,7 +274,7 @@ export class Client {
         const opts: any = {
             body,
             cache: 'no-cache',
-            headers: {'User-Agent': `dsteem/${ packageVersion }`},
+            headers: { 'User-Agent': `dsteem/${packageVersion}` },
             method: 'POST',
             mode: 'cors',
         }
@@ -279,8 +300,8 @@ export class Client {
                         return String(value)
                 }
             }
-            const {data} = response.error
-            let {message} = response.error
+            const { data } = response.error
+            let { message } = response.error
             if (data && data.stack && data.stack.length > 0) {
                 const top = data.stack[0]
                 const topData = copy(top.data)
@@ -293,18 +314,93 @@ export class Client {
                     return rv
                 })
                 const unformattedData = Object.keys(topData)
-                    .map((key) => ({key, value: formatValue(topData[key])}))
-                    .map((item) => `${ item.key }=${ item.value}`)
+                    .map((key) => ({ key, value: formatValue(topData[key]) }))
+                    .map((item) => `${item.key}=${item.value}`)
                 if (unformattedData.length > 0) {
                     message += ' ' + unformattedData.join(' ')
                 }
             }
-            throw new VError({info: data, name: 'RPCError'}, message)
+            throw new VError({ info: data, name: 'RPCError' }, message)
         }
         assert.equal(response.id, request.id, 'got invalid response id')
         return response.result
     }
-
+    /**
+        * Make a RPC call to the server.
+        *
+        * @param api     The API to call, e.g. `database_api`.
+        * @param method  The API method, e.g. `get_dynamic_global_properties`.
+        * @param params  Array of parameters to pass to the method, optional.
+        *
+        */
+    public async customCall(api: string, method: string, params: any = {}): Promise<any> {
+        const request: RPCCustomCall = {
+            id: '0',
+            jsonrpc: '2.0',
+            method: api + "." + method,
+            params: params,
+        }
+        const body = JSON.stringify(request, (key, value) => {
+            // encode Buffers as hex strings instead of an array of bytes
+            if (typeof value === 'object' && value.type === 'Buffer') {
+                return Buffer.from(value.data).toString('hex')
+            }
+            return value
+        })
+        const opts: any = {
+            body,
+            cache: 'no-cache',
+            headers: { 'User-Agent': `dsteem/${packageVersion}` },
+            method: 'POST',
+            mode: 'cors',
+        }
+        if (this.options.agent) {
+            opts.agent = this.options.agent
+        }
+        let fetchTimeout: any
+        if (api !== 'network_broadcast_api' && method.substring(0, 21) !== 'broadcast_transaction') {
+            // bit of a hack to work around some nodes high error rates
+            // only effective in node.js (until timeout spec lands in browsers)
+            fetchTimeout = (tries) => (tries + 1) * 500
+        }
+        const response: RPCResponse = await retryingFetch(
+            this.address, opts, this.timeout, this.backoff, fetchTimeout
+        )
+        // resolve FC error messages into something more readable
+        if (response.error) {
+            const formatValue = (value: any) => {
+                switch (typeof value) {
+                    case 'object':
+                        return JSON.stringify(value)
+                    default:
+                        return String(value)
+                }
+            }
+            const { data } = response.error
+            let { message } = response.error
+            if (data && data.stack && data.stack.length > 0) {
+                const top = data.stack[0]
+                const topData = copy(top.data)
+                message = top.format.replace(/\$\{([a-z_]+)\}/gi, (match: string, key: string) => {
+                    let rv = match
+                    if (topData[key]) {
+                        rv = formatValue(topData[key])
+                        delete topData[key]
+                    }
+                    return rv
+                })
+                const unformattedData = Object.keys(topData)
+                    .map((key) => ({ key, value: formatValue(topData[key]) }))
+                    .map((item) => `${item.key}=${item.value}`)
+                if (unformattedData.length > 0) {
+                    message += ' ' + unformattedData.join(' ')
+                }
+            }
+            throw new VError({ info: data, name: 'RPCError' }, message)
+        }
+        assert.equal(response.id, request.id, 'got invalid response id')
+        return response.result
+    }
 }
 
 /**
